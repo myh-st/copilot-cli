@@ -50,13 +50,13 @@ Make sure you have the AWS command line tool installed and have already run `aws
 To get a sample app up and running in one command, run the following:
 
 ```sh
-$ git clone git@github.com:aws-samples/aws-copilot-sample-service.git demo-app
-$ cd demo-app
-$ copilot init --app demo                \
-  --name api                             \
-  --type 'Load Balanced Web Service'     \
-  --dockerfile './Dockerfile'            \
-  --deploy
+git clone git@github.com:aws-samples/aws-copilot-sample-service.git demo-app
+cd demo-app
+copilot init --app demo                \
+ --name api                             \
+ --type 'Load Balanced Web Service'     \
+ --dockerfile './Dockerfile'            \
+ --deploy
 ```
 
 This will create a VPC, Application Load Balancer, an Amazon ECS Service with the sample app running on AWS Fargate.
