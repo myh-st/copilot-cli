@@ -25,7 +25,7 @@ Use Copilot to:
 
 To install with homebrew:
 ```sh
-$ brew install aws/tap/copilot-cli
+brew install aws/tap/copilot-cli
 ```
 To install manually, we're distributing binaries from our GitHub releases:
 
