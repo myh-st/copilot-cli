@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -33,7 +32,6 @@ import (
 	"github.com/aws/copilot-cli/internal/pkg/describe/stack"
 	"github.com/aws/copilot-cli/internal/pkg/manifest"
 	"github.com/aws/copilot-cli/internal/pkg/override"
-	"github.com/aws/copilot-cli/internal/pkg/s3"
 	"github.com/aws/copilot-cli/internal/pkg/template"
 	"github.com/aws/copilot-cli/internal/pkg/template/artifactpath"
 	"github.com/aws/copilot-cli/internal/pkg/template/diff"
@@ -54,7 +52,7 @@ type appResourcesGetter interface {
 }
 
 type environmentDeployer interface {
-	UpdateAndRenderEnvironment(conf deploycfn.StackConfiguration, bucketARN string, opts ...cloudformation.StackOption) error
+	UpdateAndRenderEnvironment(conf deploycfn.StackConfiguration, bucketARN string, detach bool, opts ...cloudformation.StackOption) error
 	DeployedEnvironmentParameters(app, env string) ([]*awscfn.Parameter, error)
 	ForceUpdateOutputID(app, env string) (string, error)
 }
@@ -80,15 +78,6 @@ type stackDescriber interface {
 	Resources() ([]*stack.Resource, error)
 }
 
-type bucketNameGetter interface {
-	BucketName(app, env, svc string) (string, error)
-}
-
-type addons struct {
-	stack stackBuilder
-	err   error
-}
-
 type envDeployer struct {
 	app *config.Application
 	env *config.Environment
@@ -97,7 +86,6 @@ type envDeployer struct {
 	templateFS       template.Reader
 	s3               uploader
 	prefixListGetter prefixListGetter
-	bucketNameGetter bucketNameGetter
 
 	// Dependencies to deploy an environment.
 	appCFN                   appResourcesGetter
@@ -110,13 +98,11 @@ type envDeployer struct {
 	newServiceStackDescriber func(string) stackDescriber
 
 	// Dependencies for parsing addons.
-	ws              WorkspaceAddonsReaderPathGetter
-	parseAddonsOnce sync.Once
-	parseAddons     func() (stackBuilder, error)
+	ws          WorkspaceAddonsReaderPathGetter
+	parseAddons func() (stackBuilder, error)
 
 	// Cached variables.
 	appRegionalResources *cfnstack.AppRegionalResources
-	addons               addons
 }
 
 // NewEnvDeployerInput contains information needed to construct an environment deployer.
@@ -163,7 +149,6 @@ func NewEnvDeployer(in *NewEnvDeployerInput) (*envDeployer, error) {
 		templateFS:       template.New(),
 		s3:               awss3.New(envManagerSession),
 		prefixListGetter: ec2.New(envRegionSession),
-		bucketNameGetter: s3.New(envManagerSession),
 
 		appCFN:      deploycfn.New(defaultSession, deploycfn.WithProgressTracker(os.Stderr)),
 		envDeployer: cfnClient,
@@ -185,14 +170,10 @@ func NewEnvDeployer(in *NewEnvDeployerInput) (*envDeployer, error) {
 		newServiceStackDescriber: func(svc string) stackDescriber {
 			return stack.NewStackDescriber(cfnstack.NameForWorkload(in.App.Name, in.Env.Name, svc), envManagerSession)
 		},
-
+		parseAddons: sync.OnceValues(func() (stackBuilder, error) {
+			return addon.ParseFromEnv(in.Workspace)
+		}),
 		ws: in.Workspace,
-	}
-	deployer.parseAddons = func() (stackBuilder, error) {
-		deployer.parseAddonsOnce.Do(func() {
-			deployer.addons.stack, deployer.addons.err = addon.ParseFromEnv(deployer.ws)
-		})
-		return deployer.addons.stack, deployer.addons.err
 	}
 	return deployer, nil
 }
@@ -279,6 +260,8 @@ type DeployEnvironmentInput struct {
 	RawManifest         []byte
 	PermissionsBoundary string
 	DisableRollback     bool
+	Version             string
+	Detach              bool
 }
 
 // GenerateCloudFormationTemplate returns the environment stack's template and parameter configuration.
@@ -337,7 +320,7 @@ func (d *envDeployer) DeployEnvironment(in *DeployEnvironmentInput) error {
 	if err != nil {
 		return err
 	}
-	return d.envDeployer.UpdateAndRenderEnvironment(stack, stackInput.ArtifactBucketARN, opts...)
+	return d.envDeployer.UpdateAndRenderEnvironment(stack, stackInput.ArtifactBucketARN, in.Detach, opts...)
 }
 
 func (d *envDeployer) getAppRegionalResources() (*cfnstack.AppRegionalResources, error) {
@@ -415,9 +398,6 @@ func (d *envDeployer) buildStackInput(in *DeployEnvironmentInput) (*cfnstack.Env
 	if err != nil {
 		return nil, err
 	}
-	if err := d.renderStaticSite(in.Manifest); err != nil {
-		return nil, err
-	}
 	return &cfnstack.EnvConfig{
 		Name: d.env.Name,
 		App: deploy.AppInformation{
@@ -436,24 +416,8 @@ func (d *envDeployer) buildStackInput(in *DeployEnvironmentInput) (*cfnstack.Env
 		ForceUpdate:          in.ForceNewUpdate,
 		RawMft:               in.RawManifest,
 		PermissionsBoundary:  in.PermissionsBoundary,
-		Version:              deploy.LatestEnvTemplateVersion,
+		Version:              in.Version,
 	}, nil
-}
-
-func (d *envDeployer) renderStaticSite(mft *manifest.Environment) error {
-	if mft == nil || mft.CDNConfig.Config.Static.Location.StaticBucket != "" ||
-		mft.CDNConfig.Config.Static.Location.StaticSite == "" {
-		return nil
-	}
-	staticSite := mft.CDNConfig.Config.Static.Location.StaticSite
-	bucketName, err := d.bucketNameGetter.BucketName(d.app.Name, d.env.Name, staticSite)
-	if err != nil {
-		return fmt.Errorf("get bucket name for %s in env %s: %w", staticSite, d.env.Name, err)
-	}
-	// s3.URL returns a valid URL.
-	url, _ := url.Parse(awss3.URL(d.env.Region, bucketName, ""))
-	mft.CDNConfig.Config.Static.Location.StaticBucket = url.Host
-	return nil
 }
 
 func (d *envDeployer) buildAddonsInput(region, bucket, uploadURL string) (*cfnstack.Addons, error) {

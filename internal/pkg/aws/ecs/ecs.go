@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	clusterStatusActive              = "ACTIVE"
+	statusActive                     = "ACTIVE"
 	waitServiceStablePollingInterval = 15 * time.Second
 	waitServiceStableMaxTry          = 80
 	stableServiceDeploymentNum       = 1
@@ -301,7 +301,7 @@ func (e *ECS) DefaultCluster() (string, error) {
 
 	// NOTE: right now at most 1 default cluster is possible, so cluster[0] must be the default cluster
 	cluster := resp.Clusters[0]
-	if aws.StringValue(cluster.Status) != clusterStatusActive {
+	if aws.StringValue(cluster.Status) != statusActive {
 		return "", ErrNoDefaultCluster
 	}
 
@@ -317,6 +317,56 @@ func (e *ECS) HasDefaultCluster() (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// ActiveClusters returns the subset of cluster arns that have an ACTIVE status.
+func (e *ECS) ActiveClusters(arns ...string) ([]string, error) {
+	resp, err := e.client.DescribeClusters(&ecs.DescribeClustersInput{
+		Clusters: aws.StringSlice(arns),
+	})
+	switch {
+	case err != nil:
+		return nil, fmt.Errorf("describe clusters: %w", err)
+	case len(resp.Failures) > 0:
+		return nil, fmt.Errorf("describe clusters: %s", resp.Failures[0].GoString())
+	}
+
+	var active []string
+	for _, cluster := range resp.Clusters {
+		if aws.StringValue(cluster.Status) == statusActive {
+			active = append(active, aws.StringValue(cluster.ClusterArn))
+		}
+	}
+
+	return active, nil
+}
+
+// ActiveServices returns the subset of service arns that have an ACTIVE status from the given cluster.
+func (e *ECS) ActiveServices(clusterARN string, serviceARNs ...string) ([]string, error) {
+	// All the filteredSvcARNs will belong to the given Cluster.
+	filteredSvcARNS, err := e.filterServiceARNs(clusterARN, serviceARNs...)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := e.client.DescribeServices(&ecs.DescribeServicesInput{
+		Cluster:  aws.String(clusterARN),
+		Services: aws.StringSlice(filteredSvcARNS),
+	})
+	switch {
+	case err != nil:
+		return nil, fmt.Errorf("describe services: %w", err)
+	case len(resp.Failures) > 0:
+		return nil, fmt.Errorf("describe services: %s", resp.Failures[0].GoString())
+	}
+
+	var active []string
+	for _, svc := range resp.Services {
+		if aws.StringValue(svc.Status) == statusActive {
+			active = append(active, aws.StringValue(svc.ServiceArn))
+		}
+	}
+
+	return active, nil
 }
 
 // RunTask runs a number of tasks with the task definition and network configurations in a cluster, and returns after
@@ -442,6 +492,21 @@ func (e *ECS) service(clusterName, serviceName string) (*Service, error) {
 		}
 	}
 	return nil, fmt.Errorf("cannot find service %s", serviceName)
+}
+
+// filterServiceARNs returns subset of the ServiceARNs that belong to the given Cluster.
+func (e *ECS) filterServiceARNs(clusterARN string, serviceARNs ...string) ([]string, error) {
+	var filtered []string
+	for _, arn := range serviceARNs {
+		svcArn, err := ParseServiceArn(arn)
+		if err != nil {
+			return nil, err
+		}
+		if svcArn.ClusterArn() == clusterARN {
+			filtered = append(filtered, arn)
+		}
+	}
+	return filtered, nil
 }
 
 func isRequestTimeoutErr(err error) bool {

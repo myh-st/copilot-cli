@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/aws/copilot-cli/internal/pkg/term/color"
+
 	"github.com/dustin/go-humanize/english"
 
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
@@ -58,8 +60,13 @@ func NewReachableService(app, svc string, store ConfigStoreSvc) (ReachableServic
 		return NewRDWebServiceDescriber(in)
 	case manifestinfo.BackendServiceType:
 		return NewBackendServiceDescriber(in)
+	case manifestinfo.StaticSiteType:
+		return NewStaticSiteDescriber(in)
 	default:
-		return nil, fmt.Errorf("service %s is of type %s which cannot be reached over the network", svc, cfg.Type)
+		return nil, &ErrNonAccessibleServiceType{
+			name:    svc,
+			svcType: cfg.Type,
+		}
 	}
 }
 
@@ -83,6 +90,9 @@ func (d *LBWebServiceDescriber) URI(envName string) (URI, error) {
 			albEnabled = true
 		}
 		if strings.HasPrefix(resource.LogicalID, svcStackResourceNLBTargetGroupLogicalID) {
+			nlbEnabled = true
+		}
+		if strings.HasPrefix(resource.LogicalID, svcStackResourceNLBTargetGroupV2LogicalID) {
 			nlbEnabled = true
 		}
 	}
@@ -276,13 +286,12 @@ func (d *uriDescriber) uri() (accessURI, error) {
 		return accessURI{}, fmt.Errorf("get stack resources for service %s: %w", d.svc, err)
 	}
 
-	var ruleARN string
+	var ruleARNs []string
 	for _, resource := range svcResources {
 		if resource.Type == svcStackResourceListenerRuleResourceType &&
-			((httpsEnabled && resource.LogicalID == svcStackResourceHTTPSListenerRuleLogicalID) ||
-				(!httpsEnabled && resource.LogicalID == svcStackResourceHTTPListenerRuleLogicalID)) {
-			ruleARN = resource.PhysicalID
-			break
+			((httpsEnabled && strings.HasPrefix(resource.LogicalID, svcStackResourceHTTPSListenerRuleLogicalID)) ||
+				(!httpsEnabled && strings.HasPrefix(resource.LogicalID, svcStackResourceHTTPListenerRuleLogicalID))) {
+			ruleARNs = append(ruleARNs, resource.PhysicalID)
 		}
 	}
 
@@ -290,9 +299,9 @@ func (d *uriDescriber) uri() (accessURI, error) {
 	if err != nil {
 		return accessURI{}, nil
 	}
-	dnsNames, err := lbDescr.ListenerRuleHostHeaders(ruleARN)
+	dnsNames, err := lbDescr.ListenerRulesHostHeaders(ruleARNs)
 	if err != nil {
-		return accessURI{}, fmt.Errorf("get host headers for listener rule %s: %w", ruleARN, err)
+		return accessURI{}, fmt.Errorf("get host headers for listener rules %s: %w", strings.Join(ruleARNs, ","), err)
 	}
 	if len(dnsNames) == 0 {
 		return d.envDNSName(path)
@@ -367,7 +376,7 @@ type nlbURI struct {
 func (u *LBWebServiceURI) String() string {
 	uris := u.access.strings()
 	for _, dnsName := range u.nlbURI.DNSNames {
-		uris = append(uris, fmt.Sprintf("%s:%s", dnsName, u.nlbURI.Port))
+		uris = append(uris, color.HighlightResource(fmt.Sprintf("%s:%s", dnsName, u.nlbURI.Port)))
 	}
 	return english.OxfordWordSeries(uris, "or")
 }
@@ -383,7 +392,7 @@ func (u *accessURI) strings() []string {
 		if u.Path != "/" {
 			path = fmt.Sprintf("/%s", u.Path)
 		}
-		uris = append(uris, protocol+dnsName+path)
+		uris = append(uris, color.HighlightResource(protocol+dnsName+path))
 	}
 	return uris
 }

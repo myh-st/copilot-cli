@@ -16,26 +16,32 @@ import (
 	"github.com/aws/copilot-cli/internal/pkg/aws/sessions"
 	"github.com/aws/copilot-cli/internal/pkg/cli/deploy"
 	"github.com/aws/copilot-cli/internal/pkg/config"
+	deploycfn "github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation"
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
+	"github.com/aws/copilot-cli/internal/pkg/describe"
 	"github.com/aws/copilot-cli/internal/pkg/manifest"
 	"github.com/aws/copilot-cli/internal/pkg/term/color"
 	"github.com/aws/copilot-cli/internal/pkg/term/log"
 	"github.com/aws/copilot-cli/internal/pkg/term/prompt"
 	"github.com/aws/copilot-cli/internal/pkg/term/selector"
+	"github.com/aws/copilot-cli/internal/pkg/version"
 	"github.com/aws/copilot-cli/internal/pkg/workspace"
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
+	"golang.org/x/mod/semver"
 )
 
 const continueDeploymentPrompt = "Continue with the deployment?"
 
 type deployEnvVars struct {
-	appName         string
-	name            string
-	forceNewUpdate  bool
-	disableRollback bool
-	showDiff        bool
-	skipDiffPrompt  bool
+	appName           string
+	name              string
+	forceNewUpdate    bool
+	disableRollback   bool
+	showDiff          bool
+	skipDiffPrompt    bool
+	allowEnvDowngrade bool
+	detach            bool
 }
 
 type deployEnvOpts struct {
@@ -50,15 +56,19 @@ type deployEnvOpts struct {
 	prompt prompter
 
 	// Dependencies to execute.
-	fs              afero.Fs
-	ws              wsEnvironmentReader
-	identity        identityService
-	newInterpolator func(app, env string) interpolator
-	newEnvDeployer  func() (envDeployer, error)
+	fs                  afero.Fs
+	ws                  wsEnvironmentReader
+	identity            identityService
+	newInterpolator     func(app, env string) interpolator
+	newEnvVersionGetter func(appName, envName string) (versionGetter, error)
+	newEnvDeployer      func() (envDeployer, error)
 
 	// Cached variables.
 	targetApp *config.Application
 	targetEnv *config.Environment
+
+	// Overridden in tests.
+	templateVersion string
 }
 
 func newEnvDeployOpts(vars deployEnvVars) (*deployEnvOpts, error) {
@@ -80,11 +90,19 @@ func newEnvDeployOpts(vars deployEnvVars) (*deployEnvOpts, error) {
 		store:           store,
 		sessionProvider: sessProvider,
 		sel:             selector.NewLocalEnvironmentSelector(prompter, store, ws),
-		prompt:          prompter,
+		newEnvVersionGetter: func(appName, envName string) (versionGetter, error) {
+			return describe.NewEnvDescriber(describe.NewEnvDescriberConfig{
+				App:         appName,
+				Env:         envName,
+				ConfigStore: store,
+			})
+		},
+		prompt: prompter,
 
 		fs:              fs,
 		ws:              ws,
 		identity:        identity.New(defaultSess),
+		templateVersion: version.LatestTemplateVersion(),
 		newInterpolator: newManifestInterpolator,
 	}
 	opts.newEnvDeployer = func() (envDeployer, error) {
@@ -133,8 +151,36 @@ func (o *deployEnvOpts) Ask() error {
 	return o.validateOrAskEnvName()
 }
 
+func validateEnvVersion(vg versionGetter, name, templateVersion string) error {
+	envVersion, err := vg.Version()
+	if err != nil {
+		return fmt.Errorf("get template version of environment %s: %w", name, err)
+	}
+	if envVersion == version.EnvTemplateBootstrap {
+		// Allow update to bootstrap env stack anyway.
+		return nil
+	}
+	if diff := semver.Compare(envVersion, templateVersion); diff > 0 {
+		return &errCannotDowngradeEnvVersion{
+			envName:         name,
+			envVersion:      envVersion,
+			templateVersion: templateVersion,
+		}
+	}
+	return nil
+}
+
 // Execute deploys an environment given a manifest.
 func (o *deployEnvOpts) Execute() error {
+	if !o.allowEnvDowngrade {
+		envVersionGetter, err := o.newEnvVersionGetter(o.appName, o.name)
+		if err != nil {
+			return err
+		}
+		if err := validateEnvVersion(envVersionGetter, o.name, o.templateVersion); err != nil {
+			return err
+		}
+	}
 	rawMft, err := o.ws.ReadEnvironmentManifest(o.name)
 	if err != nil {
 		return fmt.Errorf("read manifest for environment %q: %w", o.name, err)
@@ -167,6 +213,8 @@ func (o *deployEnvOpts) Execute() error {
 		PermissionsBoundary: o.targetApp.PermissionsBoundary,
 		ForceNewUpdate:      o.forceNewUpdate,
 		DisableRollback:     o.disableRollback,
+		Version:             o.templateVersion,
+		Detach:              o.detach,
 	}
 	if o.showDiff {
 		contd, err := o.showDiffAndConfirmDeployment(deployer, deployInput)
@@ -177,16 +225,31 @@ func (o *deployEnvOpts) Execute() error {
 			return nil
 		}
 	}
-	if err := deployer.DeployEnvironment(deployInput); err != nil {
-		var errEmptyChangeSet *awscfn.ErrChangeSetEmpty
-		if errors.As(err, &errEmptyChangeSet) {
-			log.Errorf(`Your update does not introduce immediate resource changes. 
+	err = deployer.DeployEnvironment(deployInput)
+	if err == nil {
+		if o.detach {
+			return nil
+		}
+		log.Successf("Succesfully deployed environment %s", o.name)
+		return nil
+	}
+	var errStackDeletedOnInterrupt *deploycfn.ErrStackDeletedOnInterrupt
+	var errStackUpdateCanceledOnInterrupt *deploycfn.ErrStackUpdateCanceledOnInterrupt
+	var errEmptyChangeSet *awscfn.ErrChangeSetEmpty
+	switch {
+	case errors.As(err, &errStackDeletedOnInterrupt):
+		return nil
+
+	case errors.As(err, &errStackUpdateCanceledOnInterrupt):
+		log.Successf("Successfully rolled back service %s to the previous configuration.\n", color.HighlightUserInput(o.name))
+		return nil
+	case errors.As(err, &errEmptyChangeSet):
+		log.Errorf(`Your update does not introduce immediate resource changes. 
 This may be because the resources are not created until they are deemed 
 necessary by a service deployment.
 
 In this case, you can run %s to push a modified template, even if there are no immediate changes.
 `, color.HighlightCode("copilot env deploy --force"))
-		}
 		if o.disableRollback {
 			stackName := stack.NameForEnv(o.targetApp.Name, o.targetEnv.Name)
 			rollbackCmd := fmt.Sprintf("aws cloudformation rollback-stack --stack-name %s --role-arn %s", stackName, o.targetEnv.ExecutionRoleARN)
@@ -197,9 +260,11 @@ After fixing the deployment, you can:
 2. Run %s to make a new deployment.
 `, color.HighlightCode(rollbackCmd), color.HighlightCode("copilot env deploy"))
 		}
-		return fmt.Errorf("deploy environment %s: %w", o.name, err)
 	}
-	return nil
+	if errors.As(err, &errEmptyChangeSet) {
+		return &errNoInfrastructureChanges{parentErr: err}
+	}
+	return fmt.Errorf("deploy environment %s: %w", o.name, err)
 }
 
 func environmentManifest(envName string, rawMft []byte, transformer interpolator) (*manifest.Environment, error) {
@@ -335,5 +400,7 @@ Deploy an environment named "test".
 	cmd.Flags().BoolVar(&vars.disableRollback, noRollbackFlag, false, noRollbackFlagDescription)
 	cmd.Flags().BoolVar(&vars.showDiff, diffFlag, false, diffFlagDescription)
 	cmd.Flags().BoolVar(&vars.skipDiffPrompt, diffAutoApproveFlag, false, diffAutoApproveFlagDescription)
+	cmd.Flags().BoolVar(&vars.allowEnvDowngrade, allowDowngradeFlag, false, allowDowngradeFlagDescription)
+	cmd.Flags().BoolVar(&vars.detach, detachFlag, false, detachFlagDescription)
 	return cmd
 }

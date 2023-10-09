@@ -829,16 +829,11 @@ func (o *runTaskOpts) runTaskCommand() (cliStringer, error) {
 }
 
 func (o *runTaskOpts) parseARN() (string, string, error) {
-	svcARN := awsecs.ServiceArn(o.generateCommandTarget)
-	clusterName, err := svcARN.ClusterName()
+	svcARN, err := awsecs.ParseServiceArn(o.generateCommandTarget)
 	if err != nil {
-		return "", "", fmt.Errorf("extract cluster name from arn %s: %w", svcARN, err)
+		return "", "", fmt.Errorf("parse service arn %s: %w", o.generateCommandTarget, err)
 	}
-	serviceName, err := svcARN.ServiceName()
-	if err != nil {
-		return "", "", fmt.Errorf("extract service name from arn %s: %w", svcARN, err)
-	}
-	return clusterName, serviceName, nil
+	return svcARN.ClusterName(), svcARN.ServiceName(), nil
 }
 
 func (o *runTaskOpts) runTaskCommandFromECSService(sess *session.Session, clusterName, serviceName string) (cliStringer, error) {
@@ -1140,7 +1135,7 @@ func (o *runTaskOpts) askEnvName() error {
 		return nil
 	}
 
-	env, err := o.sel.Environment(taskRunEnvPrompt, taskRunEnvPromptHelp, o.appName, appEnvOptionNone)
+	env, err := o.sel.Environment(taskRunEnvPrompt, taskRunEnvPromptHelp, o.appName, prompt.Option{Value: appEnvOptionNone})
 	if err != nil {
 		return fmt.Errorf("ask for environment: %w", err)
 	}

@@ -77,39 +77,6 @@ observability:
 			}(),
 			wantedFileName: "template-with-cloudfront-observability.yml",
 		},
-		"generate template with cloudfront static pattern": {
-			input: func() *stack.EnvConfig {
-				rawMft := `name: test
-type: Environment
-# Create the public ALB with certificates attached.
-cdn:
-  certificate: viewer-cert
-  static_assets:
-    location: demo-test-bucket
-    alias: example.com
-    path: static/*
-`
-				var mft manifest.Environment
-				err := yaml.Unmarshal([]byte(rawMft), &mft)
-				require.NoError(t, err)
-				mft.CDNConfig.Config.Static.Location.StaticBucket = "demo-test-bucket.s3.us-west-2.amazonaws.com"
-				return &stack.EnvConfig{
-					Version: "1.x",
-					App: deploy.AppInformation{
-						AccountPrincipalARN: "arn:aws:iam::000000000:root",
-						Name:                "demo",
-					},
-					Name:                 "test",
-					CIDRPrefixListIDs:    []string{"pl-mockid"},
-					PublicALBSourceIPs:   []string{"1.1.1.1", "2.2.2.2"},
-					ArtifactBucketARN:    "arn:aws:s3:::mockbucket",
-					ArtifactBucketKeyARN: "arn:aws:kms:us-west-2:000000000:key/1234abcd-12ab-34cd-56ef-1234567890ab",
-					Mft:                  &mft,
-					RawMft:               []byte(rawMft),
-				}
-			}(),
-			wantedFileName: "template-with-cloudfront-static-site.yml",
-		},
 		"generate template with default access logs": {
 			input: func() *stack.EnvConfig {
 				rawMft := `name: test
@@ -467,7 +434,7 @@ func compareStackTemplateSection(t *testing.T, key, wanted, actual reflect.Value
 		fmt.Sprintf("%q does not exist in the actual template", key.Interface()))
 	require.True(t, wantedExist,
 		fmt.Sprintf("%q does not exist in the expected template", key.Interface()))
-	require.Equal(t, actual.MapIndex(key).Interface(), wanted.MapIndex(key).Interface(),
+	require.Equal(t, wanted.MapIndex(key).Interface(), actual.MapIndex(key).Interface(),
 		fmt.Sprintf("Comparing %q", key.Interface()))
 }
 
@@ -477,7 +444,7 @@ func resetCustomResourceLocations(template map[any]any) {
 		"EnvControllerFunction", "DynamicDesiredCountFunction", "BacklogPerTaskCalculatorFunction",
 		"RulePriorityFunction", "NLBCustomDomainFunction", "NLBCertValidatorFunction",
 		"CustomDomainFunction", "CertificateValidationFunction", "DNSDelegationFunction",
-		"CertificateReplicatorFunction", "UniqueJSONValuesFunction", "CopyAssetsFunction", "TriggerStateMachineFunction",
+		"CertificateReplicatorFunction", "UniqueJSONValuesFunction", "TriggerStateMachineFunction",
 	}
 	for _, fnName := range functions {
 		resource, ok := resources[fnName]

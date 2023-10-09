@@ -4,7 +4,12 @@
 package manifest
 
 import (
+	"maps"
+	"strconv"
 	"time"
+
+	"github.com/aws/copilot-cli/internal/pkg/term/color"
+	"github.com/aws/copilot-cli/internal/pkg/term/log"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/imdario/mergo"
@@ -20,12 +25,14 @@ const (
 // Default values for HTTPHealthCheck for a load balanced web service.
 const (
 	DefaultHealthCheckPath        = "/"
+	DefaultHealthCheckAdminPath   = "admin"
 	DefaultHealthCheckGracePeriod = 60
 	DefaultDeregistrationDelay    = 60
 )
 
 const (
-	GRPCProtocol = "gRPC" // GRPCProtocol is the HTTP protocol version for gRPC.
+	GRPCProtocol   = "gRPC" // GRPCProtocol is the HTTP protocol version for gRPC.
+	commonGRPCPort = uint16(50051)
 )
 
 // durationp is a utility function used to convert a time.Duration to a pointer. Useful for YAML unmarshaling
@@ -66,7 +73,6 @@ type LoadBalancedWebServiceProps struct {
 	Path string
 	Port uint16
 
-	HTTPVersion string               // Optional http protocol version such as gRPC, HTTP2.
 	HealthCheck ContainerHealthCheck // Optional healthcheck configuration.
 	Platform    PlatformArgsOrString // Optional platform configuration.
 }
@@ -86,8 +92,11 @@ func NewLoadBalancedWebService(props *LoadBalancedWebServiceProps) *LoadBalanced
 		svc.LoadBalancedWebServiceConfig.TaskConfig.CPU = aws.Int(MinWindowsTaskCPU)
 		svc.LoadBalancedWebServiceConfig.TaskConfig.Memory = aws.Int(MinWindowsTaskMemory)
 	}
-	if props.HTTPVersion != "" {
-		svc.HTTPOrBool.Main.ProtocolVersion = &props.HTTPVersion
+
+	if props.Port == commonGRPCPort {
+		log.Infof("Detected port %s, setting HTTP protocol version to %s in the manifest.\n",
+			color.HighlightUserInput(strconv.Itoa(int(props.Port))), color.HighlightCode(GRPCProtocol))
+		svc.HTTPOrBool.Main.ProtocolVersion = aws.String(GRPCProtocol)
 	}
 	svc.HTTPOrBool.Main.Path = aws.String(props.Path)
 	svc.parser = template.New()
@@ -262,34 +271,61 @@ func (c *NetworkLoadBalancerListener) IsEmpty() bool {
 		c.SSLPolicy == nil && c.Stickiness == nil && c.DeregistrationDelay == nil
 }
 
+// HealthCheckPort returns the port a HealthCheck is set to for a NetworkLoadBalancerListener.
+func (listener NetworkLoadBalancerListener) HealthCheckPort(mainContainerPort *uint16) (uint16, error) {
+	// healthCheckPort is defined by Listener.HealthCheck.Port, with fallback on Listener.TargetPort, then Listener.Port.
+	if listener.HealthCheck.Port != nil {
+		return uint16(aws.IntValue(listener.HealthCheck.Port)), nil
+	}
+	if listener.TargetPort != nil {
+		return uint16(aws.IntValue(listener.TargetPort)), nil
+	}
+	if listener.Port != nil {
+		port, _, err := ParsePortMapping(listener.Port)
+		if err != nil {
+			return 0, err
+		}
+		parsedPort, err := strconv.ParseUint(aws.StringValue(port), 10, 16)
+		if err != nil {
+			return 0, err
+		}
+		return uint16(parsedPort), nil
+	}
+	if mainContainerPort != nil {
+		return aws.Uint16Value(mainContainerPort), nil
+	}
+	return 0, nil
+}
+
 // ExposedPorts returns all the ports that are container ports available to receive traffic.
 func (lbws *LoadBalancedWebService) ExposedPorts() (ExposedPortsIndex, error) {
-	var exposedPorts []ExposedPort
+	exposedPorts := make(map[uint16]ExposedPort)
 	workloadName := aws.StringValue(lbws.Name)
-	// port from image.port.
-	exposedPorts = append(exposedPorts, lbws.ImageConfig.exposedPorts(workloadName)...)
 	// port from sidecar[x].image.port.
 	for name, sidecar := range lbws.Sidecars {
-		out, err := sidecar.exposedPorts(name)
+		newExposedPorts, err := sidecar.exposePorts(exposedPorts, name)
 		if err != nil {
 			return ExposedPortsIndex{}, err
 		}
-		exposedPorts = append(exposedPorts, out...)
+		maps.Copy(exposedPorts, newExposedPorts)
 	}
 	// port from http.target_port and http.additional_rules[x].target_port
 	for _, rule := range lbws.HTTPOrBool.RoutingRules() {
-		exposedPorts = append(exposedPorts, rule.exposedPorts(exposedPorts, workloadName)...)
+		maps.Copy(exposedPorts, rule.exposePorts(exposedPorts, workloadName))
 	}
 
 	// port from nlb.target_port and nlb.additional_listeners[x].target_port
 	for _, listener := range lbws.NLBConfig.NLBListeners() {
-		out, err := listener.exposedPorts(exposedPorts, workloadName)
+		newExposedPorts, err := listener.exposePorts(exposedPorts, workloadName)
 		if err != nil {
 			return ExposedPortsIndex{}, err
 		}
-		exposedPorts = append(exposedPorts, out...)
+		maps.Copy(exposedPorts, newExposedPorts)
 	}
-	portsForContainer, containerForPort := prepareParsedExposedPortsMap(sortExposedPorts(exposedPorts))
+	// port from image.port
+	maps.Copy(exposedPorts, lbws.ImageConfig.exposePorts(exposedPorts, workloadName))
+
+	portsForContainer, containerForPort := prepareParsedExposedPortsMap(exposedPorts)
 	return ExposedPortsIndex{
 		WorkloadName:      workloadName,
 		PortsForContainer: portsForContainer,

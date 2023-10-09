@@ -4,6 +4,8 @@
 package manifest
 
 import (
+	"maps"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
 	"github.com/aws/copilot-cli/internal/pkg/template"
@@ -42,6 +44,7 @@ type BackendServiceConfig struct {
 type BackendServiceProps struct {
 	WorkloadProps
 	Port        uint16
+	Path        string               // Optional path if multiple ports are exposed.
 	HealthCheck ContainerHealthCheck // Optional healthcheck configuration.
 	Platform    PlatformArgsOrString // Optional platform configuration.
 }
@@ -55,6 +58,7 @@ func NewBackendService(props BackendServiceProps) *BackendService {
 	svc.BackendServiceConfig.ImageConfig.Image.Location = stringP(props.Image)
 	svc.BackendServiceConfig.ImageConfig.Image.Build.BuildArgs.Dockerfile = stringP(props.Dockerfile)
 	svc.BackendServiceConfig.ImageConfig.Port = uint16P(props.Port)
+
 	svc.BackendServiceConfig.ImageConfig.HealthCheck = props.HealthCheck
 	svc.BackendServiceConfig.Platform = props.Platform
 	if isWindowsPlatform(props.Platform) {
@@ -197,21 +201,21 @@ func newDefaultBackendService() *BackendService {
 
 // ExposedPorts returns all the ports that are container ports available to receive traffic.
 func (b *BackendService) ExposedPorts() (ExposedPortsIndex, error) {
-	var exposedPorts []ExposedPort
+	exposedPorts := make(map[uint16]ExposedPort)
 
 	workloadName := aws.StringValue(b.Name)
-	exposedPorts = append(exposedPorts, b.ImageConfig.exposedPorts(workloadName)...)
 	for name, sidecar := range b.Sidecars {
-		out, err := sidecar.exposedPorts(name)
+		newExposedPorts, err := sidecar.exposePorts(exposedPorts, name)
 		if err != nil {
 			return ExposedPortsIndex{}, err
 		}
-		exposedPorts = append(exposedPorts, out...)
+		maps.Copy(exposedPorts, newExposedPorts)
 	}
 	for _, rule := range b.HTTP.RoutingRules() {
-		exposedPorts = append(exposedPorts, rule.exposedPorts(exposedPorts, workloadName)...)
+		maps.Copy(exposedPorts, rule.exposePorts(exposedPorts, workloadName))
 	}
-	portsForContainer, containerForPort := prepareParsedExposedPortsMap(sortExposedPorts(exposedPorts))
+	maps.Copy(exposedPorts, b.ImageConfig.exposePorts(exposedPorts, workloadName))
+	portsForContainer, containerForPort := prepareParsedExposedPortsMap(exposedPorts)
 	return ExposedPortsIndex{
 		WorkloadName:      workloadName,
 		PortsForContainer: portsForContainer,

@@ -367,6 +367,16 @@ func TestEnvControllerParameters(t *testing.T) {
 			},
 			expected: []string{"ALBWorkloads,", "Aliases,"},
 		},
+		"LBWS with imported ALB": {
+			opts: WorkloadOpts{
+				WorkloadType: "Load Balanced Web Service",
+				ALBEnabled:   true,
+				ImportedALB: &ImportedALB{
+					Name: aws.String("MyExistingALB"),
+				},
+			},
+			expected: []string{"Aliases,"},
+		},
 		"LBWS with ALB and private placement": {
 			opts: WorkloadOpts{
 				WorkloadType: "Load Balanced Web Service",
@@ -500,6 +510,34 @@ func TestApplicationLoadBalancer_Aliases(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			require.Equal(t, tc.expected, tc.opts.Aliases())
+		})
+	}
+}
+
+func Test_truncateWithHashPadding(t *testing.T) {
+	tests := map[string]struct {
+		inString  string
+		inMax     int
+		inPadding int
+		expected  string
+	}{
+		"less than max": {
+			inString:  "mockString",
+			inMax:     64,
+			inPadding: 0,
+			expected:  "mockString",
+		},
+		"truncate with hash padding": {
+			inString:  "longapp-longenv-longsvc",
+			inMax:     10,
+			inPadding: 6,
+			expected:  "longapp-lo7693be",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.expected, truncateWithHashPadding(tc.inString, tc.inMax, tc.inPadding))
 		})
 	}
 }

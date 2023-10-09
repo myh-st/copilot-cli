@@ -33,7 +33,8 @@ const (
 	envOutputPublicALBAccessible         = "PublicALBAccessible"
 
 	svcStackResourceALBTargetGroupLogicalID    = "TargetGroup"
-	svcStackResourceNLBTargetGroupLogicalID    = "NLBTargetGroup"
+	svcStackResourceNLBTargetGroupLogicalID    = "NLBTargetGroup" // TODO(Aiden): remove when NetworkLoadBalancer is forcibly updated
+	svcStackResourceNLBTargetGroupV2LogicalID  = "NetworkLoadBalancerTargetGroup"
 	svcStackResourceHTTPSListenerRuleLogicalID = "HTTPSListenerRule"
 	svcStackResourceHTTPListenerRuleLogicalID  = "HTTPListenerRule"
 	svcStackResourceListenerRuleResourceType   = "AWS::ElasticLoadBalancingV2::ListenerRule"
@@ -47,7 +48,7 @@ type envDescriber interface {
 }
 
 type lbDescriber interface {
-	ListenerRuleHostHeaders(ruleARN string) ([]string, error)
+	ListenerRulesHostHeaders(ruleARNs []string) ([]string, error)
 }
 
 // LBWebServiceDescriber retrieves information about a load balanced web service.
@@ -93,9 +94,10 @@ func NewLBWebServiceDescriber(opt NewServiceConfig) (*LBWebServiceDescriber, err
 		}
 		svcDescr, err := newECSServiceDescriber(NewServiceConfig{
 			App:         opt.App,
+			Env:         env,
 			Svc:         opt.Svc,
 			ConfigStore: opt.ConfigStore,
-		}, env)
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -309,7 +311,7 @@ func (w *webSvcDesc) HumanString() string {
 		fmt.Fprintf(writer, "  %s\t%s\n", route.Environment, route.URL)
 	}
 	if len(w.ServiceConnect) > 0 || len(w.ServiceDiscovery) > 0 {
-		fmt.Fprint(writer, color.Bold.Sprint("\nInternal Service Endpoint\n\n"))
+		fmt.Fprint(writer, color.Bold.Sprint("\nInternal Service Endpoints\n\n"))
 		writer.Flush()
 		endpoints := serviceEndpoints{
 			discoveries: w.ServiceDiscovery,

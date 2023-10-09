@@ -9,6 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
+
+	clideploy "github.com/aws/copilot-cli/internal/pkg/cli/deploy"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ssm"
@@ -80,7 +83,7 @@ func newDeleteSvcOpts(vars deleteSvcVars) (*deleteSvcOpts, error) {
 
 	store := config.NewSSMStore(identity.New(defaultSession), ssm.New(defaultSession), aws.StringValue(defaultSession.Config.Region))
 	prompter := prompt.New()
-	return &deleteSvcOpts{
+	opts := &deleteSvcOpts{
 		deleteSvcVars: vars,
 
 		store:   store,
@@ -95,13 +98,14 @@ func newDeleteSvcOpts(vars deleteSvcVars) (*deleteSvcOpts, error) {
 		getECR: func(sess *awssession.Session) imageRemover {
 			return ecr.New(sess)
 		},
-		newSvcCleaner: func(sess *awssession.Session, manifestType string) cleaner {
-			if manifestType == manifestinfo.StaticSiteType {
-				return clean.StaticSite(vars.appName, vars.envName, vars.name, s3.New(sess), awss3.New(sess))
-			}
-			return &clean.NoOp{}
-		},
-	}, nil
+	}
+	opts.newSvcCleaner = func(sess *awssession.Session, manifestType string) cleaner {
+		if manifestType == manifestinfo.StaticSiteType {
+			return clean.StaticSite(opts.appName, opts.envName, opts.name, s3.New(sess), awss3.New(sess))
+		}
+		return &clean.NoOp{}
+	}
+	return opts, nil
 }
 
 // Validate returns an error for any invalid optional flags.
@@ -293,13 +297,13 @@ func (o *deleteSvcOpts) deleteStacks(wkldType string, envs []*config.Environment
 func (o *deleteSvcOpts) emptyECRRepos(envs []*config.Environment) error {
 	var uniqueRegions []string
 	for _, env := range envs {
-		if !contains(env.Region, uniqueRegions) {
+		if !slices.Contains(uniqueRegions, env.Region) {
 			uniqueRegions = append(uniqueRegions, env.Region)
 		}
 	}
 
 	// TODO: centralized ECR repo name
-	repoName := fmt.Sprintf("%s/%s", o.appName, o.name)
+	repoName := clideploy.RepoName(o.appName, o.name)
 	for _, region := range uniqueRegions {
 		sess, err := o.sess.DefaultWithRegion(region)
 		if err != nil {

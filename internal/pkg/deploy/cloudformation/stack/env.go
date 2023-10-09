@@ -47,6 +47,24 @@ const (
 	envOutputManagerRoleKey      = "EnvironmentManagerRoleARN"
 )
 
+// Cloudformation stack tag keys.
+const (
+	StackNameTagKey = "aws:cloudformation:stack-name"
+	LogicalIDTagKey = "aws:cloudformation:logical-id"
+)
+
+// Environment managed S3 buckets.
+const (
+	ELBAccessLogsBucketLogicalID = "ELBAccessLogsBucket"
+)
+
+// Slice of environment managed S3 bucket IDs.
+var (
+	EnvManagedS3BucketLogicalIds = []string{
+		ELBAccessLogsBucketLogicalID,
+	}
+)
+
 const (
 	// DefaultVPCCIDR is the default CIDR used for a manged VPC.
 	DefaultVPCCIDR = "10.0.0.0/16"
@@ -197,8 +215,7 @@ func (e *Env) Template() (string, error) {
 		Telemetry:            e.telemetryConfig(),
 		CDNConfig:            e.cdnConfig(),
 
-		Version:            e.in.Version,
-		LatestVersion:      deploy.LatestEnvTemplateVersion,
+		LatestVersion:      e.in.Version,
 		SerializedManifest: string(e.in.RawMft),
 		ForceUpdateID:      forceUpdateID,
 		DelegateDNS:        e.in.App.Domain != "",
@@ -475,10 +492,9 @@ func (e *Env) cdnConfig() *template.CDNConfig {
 	}
 	if !mftConfig.Static.IsEmpty() {
 		config.Static = &template.CDNStaticAssetConfig{
-			ImportedBucket:   mftConfig.Static.Location.ImportedBucket,
-			StaticSiteBucket: mftConfig.Static.Location.StaticBucket,
-			Path:             mftConfig.Static.Path,
-			Alias:            mftConfig.Static.Alias,
+			ImportedBucket: mftConfig.Static.Location,
+			Path:           mftConfig.Static.Path,
+			Alias:          mftConfig.Static.Alias,
 		}
 	}
 	return config

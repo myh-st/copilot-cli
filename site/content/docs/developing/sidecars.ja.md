@@ -46,7 +46,8 @@ count: 1
 sidecars:
   nginx:
     port: 80
-    image: 1234567890.dkr.ecr.us-west-2.amazonaws.com/reverse-proxy:revision_1
+    image:
+      build: src/reverseproxy/Dockerfile
     variables:
       NGINX_PORT: 80
 ```
@@ -206,5 +207,4 @@ Outputs:
 
 !!!info
     FireLens ログドライバーは主となるコンテナのログを様々な宛先へルーティングできる一方で、 [`svc logs`](../commands/svc-logs.ja.md) コマンドは CloudWatch Logs で Copilot Service のために作成したロググループに送信された場合のみログをトラックできます。
-
 

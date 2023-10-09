@@ -233,9 +233,9 @@ func (mr *MockenvironmentDeployerMockRecorder) ForceUpdateOutputID(app, env inte
 }
 
 // UpdateAndRenderEnvironment mocks base method.
-func (m *MockenvironmentDeployer) UpdateAndRenderEnvironment(conf cloudformation1.StackConfiguration, bucketARN string, opts ...cloudformation0.StackOption) error {
+func (m *MockenvironmentDeployer) UpdateAndRenderEnvironment(conf cloudformation1.StackConfiguration, bucketARN string, detach bool, opts ...cloudformation0.StackOption) error {
 	m.ctrl.T.Helper()
-	varargs := []interface{}{conf, bucketARN}
+	varargs := []interface{}{conf, bucketARN, detach}
 	for _, a := range opts {
 		varargs = append(varargs, a)
 	}
@@ -245,9 +245,9 @@ func (m *MockenvironmentDeployer) UpdateAndRenderEnvironment(conf cloudformation
 }
 
 // UpdateAndRenderEnvironment indicates an expected call of UpdateAndRenderEnvironment.
-func (mr *MockenvironmentDeployerMockRecorder) UpdateAndRenderEnvironment(conf, bucketARN interface{}, opts ...interface{}) *gomock.Call {
+func (mr *MockenvironmentDeployerMockRecorder) UpdateAndRenderEnvironment(conf, bucketARN, detach interface{}, opts ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	varargs := append([]interface{}{conf, bucketARN}, opts...)
+	varargs := append([]interface{}{conf, bucketARN, detach}, opts...)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "UpdateAndRenderEnvironment", reflect.TypeOf((*MockenvironmentDeployer)(nil).UpdateAndRenderEnvironment), varargs...)
 }
 
@@ -452,42 +452,4 @@ func (m *MockstackDescriber) Resources() ([]*stack0.Resource, error) {
 func (mr *MockstackDescriberMockRecorder) Resources() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Resources", reflect.TypeOf((*MockstackDescriber)(nil).Resources))
-}
-
-// MockbucketNameGetter is a mock of bucketNameGetter interface.
-type MockbucketNameGetter struct {
-	ctrl     *gomock.Controller
-	recorder *MockbucketNameGetterMockRecorder
-}
-
-// MockbucketNameGetterMockRecorder is the mock recorder for MockbucketNameGetter.
-type MockbucketNameGetterMockRecorder struct {
-	mock *MockbucketNameGetter
-}
-
-// NewMockbucketNameGetter creates a new mock instance.
-func NewMockbucketNameGetter(ctrl *gomock.Controller) *MockbucketNameGetter {
-	mock := &MockbucketNameGetter{ctrl: ctrl}
-	mock.recorder = &MockbucketNameGetterMockRecorder{mock}
-	return mock
-}
-
-// EXPECT returns an object that allows the caller to indicate expected use.
-func (m *MockbucketNameGetter) EXPECT() *MockbucketNameGetterMockRecorder {
-	return m.recorder
-}
-
-// BucketName mocks base method.
-func (m *MockbucketNameGetter) BucketName(app, env, svc string) (string, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "BucketName", app, env, svc)
-	ret0, _ := ret[0].(string)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-// BucketName indicates an expected call of BucketName.
-func (mr *MockbucketNameGetterMockRecorder) BucketName(app, env, svc interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "BucketName", reflect.TypeOf((*MockbucketNameGetter)(nil).BucketName), app, env, svc)
 }

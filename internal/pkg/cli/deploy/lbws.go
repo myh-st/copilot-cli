@@ -5,7 +5,6 @@ package deploy
 
 import (
 	"fmt"
-	"regexp"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -25,6 +24,7 @@ import (
 	"github.com/aws/copilot-cli/internal/pkg/template"
 	"github.com/aws/copilot-cli/internal/pkg/term/color"
 	"github.com/aws/copilot-cli/internal/pkg/term/log"
+	"github.com/aws/copilot-cli/internal/pkg/version"
 )
 
 var (
@@ -42,6 +42,7 @@ var (
 		color.HighlightCode("copilot app init --domain example.com"))
 )
 
+// TODO(Aiden): remove when NetworkLoadBalancer is forcibly updated
 type publicCIDRBlocksGetter interface {
 	PublicCIDRBlocks() ([]string, error)
 }
@@ -68,6 +69,8 @@ func NewLBWSDeployer(in *WorkloadDeployerInput) (*lbWebSvcDeployer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new app describer for application %s: %w", in.App.Name, err)
 	}
+
+	// TODO(Aiden): remove when NetworkLoadBalancer is forcibly updated
 	deployStore, err := deploy.NewStore(in.SessionProvider, svcDeployer.store)
 	if err != nil {
 		return nil, fmt.Errorf("new deploy store: %w", err)
@@ -78,6 +81,7 @@ func NewLBWSDeployer(in *WorkloadDeployerInput) (*lbWebSvcDeployer, error) {
 		ConfigStore: svcDeployer.store,
 		DeployStore: deployStore,
 	})
+
 	if err != nil {
 		return nil, fmt.Errorf("create describer for environment %s in application %s: %w", in.Env.Name, in.App.Name, err)
 	}
@@ -114,7 +118,7 @@ func (lbWebSvcDeployer) IsServiceAvailableInRegion(region string) (bool, error) 
 
 // UploadArtifacts uploads the deployment artifacts such as the container image, custom resources, addons and env files.
 func (d *lbWebSvcDeployer) UploadArtifacts() (*UploadArtifactsOutput, error) {
-	return d.uploadArtifacts(d.uploadContainerImages, d.uploadArtifactsToS3, d.uploadCustomResources)
+	return d.uploadArtifacts(d.buildAndPushContainerImages, d.uploadArtifactsToS3, d.uploadCustomResources)
 }
 
 // GenerateCloudFormationTemplate generates a CloudFormation template and parameters for a workload.
@@ -188,6 +192,9 @@ func (d *lbWebSvcDeployer) stackConfiguration(in *StackRuntimeConfiguration) (*s
 }
 
 func (d *lbWebSvcDeployer) validateALBRuntime() error {
+	if d.lbMft.HTTPOrBool.Disabled() {
+		return nil
+	}
 
 	if err := d.validateRuntimeRoutingRule(d.lbMft.HTTPOrBool.Main); err != nil {
 		return fmt.Errorf(`validate ALB runtime configuration for "http": %w`, err)
@@ -249,7 +256,7 @@ func (d *lbWebSvcDeployer) validateRuntimeRoutingRule(rule manifest.RoutingRule)
 		return nil
 	}
 	if d.app.Domain != "" {
-		err := validateMinAppVersion(d.app.Name, aws.StringValue(d.lbMft.Name), d.appVersionGetter, deploy.AliasLeastAppTemplateVersion)
+		err := validateMinAppVersion(d.app.Name, aws.StringValue(d.lbMft.Name), d.appVersionGetter, version.AppTemplateMinAlias)
 		if err != nil {
 			return fmt.Errorf("alias not supported: %w", err)
 		}
@@ -275,7 +282,7 @@ func (d *lbWebSvcDeployer) validateNLBRuntime() error {
 		log.Errorf(ecsNLBAliasUsedWithoutDomainFriendlyText)
 		return fmt.Errorf("cannot specify nlb.alias when application is not associated with a domain")
 	}
-	err := validateMinAppVersion(d.app.Name, aws.StringValue(d.lbMft.Name), d.appVersionGetter, deploy.AliasLeastAppTemplateVersion)
+	err := validateMinAppVersion(d.app.Name, aws.StringValue(d.lbMft.Name), d.appVersionGetter, version.AppTemplateMinAlias)
 	if err != nil {
 		return fmt.Errorf("alias not supported: %w", err)
 	}
@@ -285,48 +292,15 @@ func (d *lbWebSvcDeployer) validateNLBRuntime() error {
 	return nil
 }
 
-func validateLBWSAlias(aliases manifest.Alias, app *config.Application, envName string) error {
-	if aliases.IsEmpty() {
+func validateLBWSAlias(alias manifest.Alias, app *config.Application, envName string) error {
+	if alias.IsEmpty() {
 		return nil
 	}
-	aliasList, err := aliases.ToStringSlice()
+
+	aliases, err := alias.ToStringSlice()
 	if err != nil {
 		return err
 	}
-	for _, alias := range aliasList {
-		// Alias should be within either env, app, or root hosted zone.
-		var regEnvHostedZone, regAppHostedZone, regRootHostedZone *regexp.Regexp
-		var err error
-		if regEnvHostedZone, err = regexp.Compile(fmt.Sprintf(`^([^\.]+\.)?%s.%s.%s`, envName, app.Name, app.Domain)); err != nil {
-			return err
-		}
-		if regAppHostedZone, err = regexp.Compile(fmt.Sprintf(`^([^\.]+\.)?%s.%s`, app.Name, app.Domain)); err != nil {
-			return err
-		}
-		if regRootHostedZone, err = regexp.Compile(fmt.Sprintf(`^([^\.]+\.)?%s`, app.Domain)); err != nil {
-			return err
-		}
-		var validAlias bool
-		for _, re := range []*regexp.Regexp{regEnvHostedZone, regAppHostedZone, regRootHostedZone} {
-			if re.MatchString(alias) {
-				validAlias = true
-				break
-			}
-		}
-		if validAlias {
-			continue
-		}
-		log.Errorf(`%s must match one of the following patterns:
-- %s.%s.%s,
-- <name>.%s.%s.%s,
-- %s.%s,
-- <name>.%s.%s,
-- %s,
-- <name>.%s
-`, color.HighlightCode("http.alias"), envName, app.Name, app.Domain, envName,
-			app.Name, app.Domain, app.Name, app.Domain, app.Name,
-			app.Domain, app.Domain, app.Domain)
-		return fmt.Errorf(`alias "%s" is not supported in hosted zones managed by Copilot`, alias)
-	}
-	return nil
+
+	return validateAliases(app, envName, aliases...)
 }

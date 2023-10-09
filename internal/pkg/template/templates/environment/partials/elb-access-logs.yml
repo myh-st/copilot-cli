@@ -30,7 +30,6 @@ ELBAccessLogsBucket:
   Metadata:
     "aws:copilot:description": "A S3 bucket for the Load Balancer's access logs"
   Type: AWS::S3::Bucket
-  Condition: CreateALB
   Properties:
     VersioningConfiguration:
       Status: Enabled
@@ -38,3 +37,8 @@ ELBAccessLogsBucket:
       ServerSideEncryptionConfiguration:
         - ServerSideEncryptionByDefault:
             SSEAlgorithm: AES256 
+    PublicAccessBlockConfiguration:
+      BlockPublicAcls: true
+      BlockPublicPolicy: true
+      IgnorePublicAcls: true
+      RestrictPublicBuckets: true

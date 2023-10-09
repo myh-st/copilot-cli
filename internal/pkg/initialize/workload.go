@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/copilot-cli/internal/pkg/config"
+	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation"
 	"github.com/aws/copilot-cli/internal/pkg/manifest"
 	"github.com/aws/copilot-cli/internal/pkg/manifest/manifestinfo"
 	"github.com/aws/copilot-cli/internal/pkg/term/color"
@@ -23,10 +23,6 @@ import (
 const (
 	jobWlType = "job"
 	svcWlType = "service"
-)
-
-const (
-	commonGRPCPort = uint16(50051)
 )
 
 var fmtErrUnrecognizedWlType = "unrecognized workload type %s"
@@ -42,8 +38,8 @@ type Store interface {
 
 // WorkloadAdder contains the methods needed to add jobs and services to an existing application.
 type WorkloadAdder interface {
-	AddJobToApp(app *config.Application, jobName string) error
-	AddServiceToApp(app *config.Application, serviceName string) error
+	AddJobToApp(app *config.Application, jobName string, opts ...cloudformation.AddWorkloadToAppOpt) error
+	AddServiceToApp(app *config.Application, serviceName string, opts ...cloudformation.AddWorkloadToAppOpt) error
 }
 
 // Workspace contains the methods needed to manipulate a Copilot workspace.
@@ -100,6 +96,26 @@ type WorkloadInitializer struct {
 	Prog     Prog
 }
 
+// AddWorkloadToApp contains the logic to create the SSM parameter and perform the stackset template update required
+// to add any workload to the app. It does not write the manifest.
+func (w *WorkloadInitializer) AddWorkloadToApp(appName, name, workloadType string) error {
+	svcOrJob := svcWlType
+	if manifestinfo.IsTypeAJob(workloadType) {
+		svcOrJob = jobWlType
+	}
+
+	app, err := w.Store.GetApplication(appName)
+	if err != nil {
+		return fmt.Errorf("get application %s: %w", appName, err)
+	}
+	// addWlToAppandSSM only uses the App, Name, and Type
+	return w.addWlToAppAndSSM(app, WorkloadProps{
+		App:  appName,
+		Type: workloadType,
+		Name: name,
+	}, svcOrJob)
+}
+
 // Service writes the service manifest, creates an ECR repository, and adds the service to SSM.
 func (w *WorkloadInitializer) Service(i *ServiceProps) (string, error) {
 	return w.initService(i)
@@ -110,12 +126,15 @@ func (w *WorkloadInitializer) Job(i *JobProps) (string, error) {
 	return w.initJob(i)
 }
 
-func (w *WorkloadInitializer) addWlToApp(app *config.Application, wlName string, wlType string) error {
+func (w *WorkloadInitializer) addWlToApp(app *config.Application, props WorkloadProps, wlType string) error {
 	switch wlType {
 	case svcWlType:
-		return w.Deployer.AddServiceToApp(app, wlName)
+		if props.Type == manifestinfo.StaticSiteType {
+			return w.Deployer.AddServiceToApp(app, props.Name, cloudformation.AddWorkloadToAppOptWithoutECR)
+		}
+		return w.Deployer.AddServiceToApp(app, props.Name)
 	case jobWlType:
-		return w.Deployer.AddJobToApp(app, wlName)
+		return w.Deployer.AddJobToApp(app, props.Name)
 	default:
 		return fmt.Errorf(fmtErrUnrecognizedWlType, wlType)
 	}
@@ -227,9 +246,6 @@ func (w *WorkloadInitializer) initService(props *ServiceProps) (string, error) {
 	log.Successf(manifestMsgFmt, svcWlType, color.HighlightUserInput(props.Name), color.HighlightResource(path))
 
 	helpText := "Your manifest contains configurations like your container size and port."
-	if props.Port != 0 {
-		helpText = fmt.Sprintf("Your manifest contains configurations like your container size and port (:%d).", props.Port)
-	}
 	log.Infoln(color.Help(helpText))
 	log.Infoln()
 
@@ -253,8 +269,9 @@ func (w *WorkloadInitializer) addJobToAppAndSSM(app *config.Application, props W
 	return w.addWlToAppAndSSM(app, props, jobWlType)
 }
 
+// addWlToAppAndSSM is a type-agnostic method to add a workload to the app and config store.
 func (w *WorkloadInitializer) addWlToAppAndSSM(app *config.Application, props WorkloadProps, wlType string) error {
-	if err := w.addWlToApp(app, props.Name, wlType); err != nil {
+	if err := w.addWlToApp(app, props, wlType); err != nil {
 		return fmt.Errorf("add %s %s to application %s: %w", wlType, props.Name, props.App, err)
 	}
 
@@ -296,9 +313,9 @@ func (w *WorkloadInitializer) newServiceManifest(i *ServiceProps) (encoding.Bina
 	case manifestinfo.LoadBalancedWebServiceType:
 		return w.newLoadBalancedWebServiceManifest(i)
 	case manifestinfo.RequestDrivenWebServiceType:
-		return w.newRequestDrivenWebServiceManifest(i), nil
+		return newRequestDrivenWebServiceManifest(i), nil
 	case manifestinfo.BackendServiceType:
-		return newBackendServiceManifest(i)
+		return w.newBackendServiceManifest(i)
 	case manifestinfo.WorkerServiceType:
 		return newWorkerServiceManifest(i)
 	case manifestinfo.StaticSiteType:
@@ -309,12 +326,6 @@ func (w *WorkloadInitializer) newServiceManifest(i *ServiceProps) (encoding.Bina
 }
 
 func (w *WorkloadInitializer) newLoadBalancedWebServiceManifest(inProps *ServiceProps) (*manifest.LoadBalancedWebService, error) {
-	var httpVersion string
-	if inProps.Port == commonGRPCPort {
-		log.Infof("Detected port %s, setting HTTP protocol version to %s in the manifest.\n",
-			color.HighlightUserInput(strconv.Itoa(int(inProps.Port))), color.HighlightCode(manifest.GRPCProtocol))
-		httpVersion = manifest.GRPCProtocol
-	}
 	outProps := &manifest.LoadBalancedWebServiceProps{
 		WorkloadProps: &manifest.WorkloadProps{
 			Name:                    inProps.Name,
@@ -324,7 +335,6 @@ func (w *WorkloadInitializer) newLoadBalancedWebServiceManifest(inProps *Service
 		},
 		Path:        "/",
 		Port:        inProps.Port,
-		HTTPVersion: httpVersion,
 		HealthCheck: inProps.HealthCheck,
 		Platform:    inProps.Platform,
 	}
@@ -345,7 +355,7 @@ func (w *WorkloadInitializer) newLoadBalancedWebServiceManifest(inProps *Service
 	return manifest.NewLoadBalancedWebService(outProps), nil
 }
 
-func (w *WorkloadInitializer) newRequestDrivenWebServiceManifest(i *ServiceProps) *manifest.RequestDrivenWebService {
+func newRequestDrivenWebServiceManifest(i *ServiceProps) *manifest.RequestDrivenWebService {
 	props := &manifest.RequestDrivenWebServiceProps{
 		WorkloadProps: &manifest.WorkloadProps{
 			Name:       i.Name,
@@ -359,8 +369,8 @@ func (w *WorkloadInitializer) newRequestDrivenWebServiceManifest(i *ServiceProps
 	return manifest.NewRequestDrivenWebService(props)
 }
 
-func newBackendServiceManifest(i *ServiceProps) (*manifest.BackendService, error) {
-	return manifest.NewBackendService(manifest.BackendServiceProps{
+func (w *WorkloadInitializer) newBackendServiceManifest(i *ServiceProps) (*manifest.BackendService, error) {
+	outProps := manifest.BackendServiceProps{
 		WorkloadProps: manifest.WorkloadProps{
 			Name:                    i.Name,
 			Dockerfile:              i.DockerfilePath,
@@ -370,7 +380,9 @@ func newBackendServiceManifest(i *ServiceProps) (*manifest.BackendService, error
 		Port:        i.Port,
 		HealthCheck: i.HealthCheck,
 		Platform:    i.Platform,
-	}), nil
+	}
+
+	return manifest.NewBackendService(outProps), nil
 }
 
 func newWorkerServiceManifest(i *ServiceProps) (*manifest.WorkerService, error) {
@@ -390,7 +402,7 @@ func newWorkerServiceManifest(i *ServiceProps) (*manifest.WorkerService, error) 
 
 func newStaticSiteServiceManifest(i *ServiceProps) (*manifest.StaticSite, error) {
 	return manifest.NewStaticSite(manifest.StaticSiteProps{
-		Name:            i.Name,
+		Name: i.Name,
 		StaticSiteConfig: manifest.StaticSiteConfig{
 			FileUploads: i.FileUploads,
 		},

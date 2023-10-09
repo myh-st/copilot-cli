@@ -8,6 +8,8 @@ import (
 	"encoding"
 	"io"
 
+	sdkcloudformation "github.com/aws/aws-sdk-go/service/cloudformation"
+
 	"github.com/aws/aws-sdk-go/aws/session"
 	awscloudformation "github.com/aws/copilot-cli/internal/pkg/aws/cloudformation"
 	"github.com/aws/copilot-cli/internal/pkg/aws/codepipeline"
@@ -21,6 +23,7 @@ import (
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation"
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 	"github.com/aws/copilot-cli/internal/pkg/describe"
+	stackdescr "github.com/aws/copilot-cli/internal/pkg/describe/stack"
 	"github.com/aws/copilot-cli/internal/pkg/docker/dockerengine"
 	"github.com/aws/copilot-cli/internal/pkg/docker/dockerfile"
 	"github.com/aws/copilot-cli/internal/pkg/ecs"
@@ -111,6 +114,7 @@ type environmentStore interface {
 	environmentGetter
 	environmentLister
 	environmentDeleter
+	applicationGetter
 }
 
 type environmentCreator interface {
@@ -167,6 +171,7 @@ type secretDeleter interface {
 
 type imageBuilderPusher interface {
 	BuildAndPush(ctx context.Context, args *dockerengine.BuildArguments, w io.Writer) (string, error)
+	Build(ctx context.Context, args *dockerengine.BuildArguments, w io.Writer) (string, error)
 }
 
 type repositoryLogin interface {
@@ -176,6 +181,10 @@ type repositoryLogin interface {
 type repositoryService interface {
 	repositoryLogin
 	imageBuilderPusher
+}
+
+type ecsLocalClient interface {
+	TaskDefinition(app, env, svc string) (*awsecs.TaskDefinition, error)
 }
 
 type logEventsWriter interface {
@@ -328,7 +337,9 @@ type wsEnvironmentReader interface {
 
 type wsPipelineReader interface {
 	wsPipelineGetter
+	wsPipelineManifestReader
 	relPath
+	PipelineOverridesPath(string) string
 }
 
 type wsPipelineGetter interface {
@@ -341,6 +352,11 @@ type wsAppManager interface {
 	Summary() (*workspace.Summary, error)
 }
 
+type wsAppManagerDeleter interface {
+	wsAppManager
+	wsFileDeleter
+}
+
 type wsWriter interface {
 	Write(content encoding.BinaryMarshaler, path string) (string, error)
 }
@@ -351,6 +367,10 @@ type uploader interface {
 
 type bucketEmptier interface {
 	EmptyBucket(bucket string) error
+}
+
+type stackDescriber interface {
+	Resources() ([]*stackdescr.Resource, error)
 }
 
 // Interfaces for deploying resources through CloudFormation. Facilitates mocking.
@@ -379,19 +399,20 @@ type imageRemover interface {
 }
 
 type pipelineDeployer interface {
-	CreatePipeline(env *deploy.CreatePipelineInput, bucketName string) error
-	UpdatePipeline(env *deploy.CreatePipelineInput, bucketName string) error
-	PipelineExists(env *deploy.CreatePipelineInput) (bool, error)
+	CreatePipeline(bucketName string, stackConfig cloudformation.StackConfiguration) error
+	UpdatePipeline(bucketName string, stackConfig cloudformation.StackConfiguration) error
+	PipelineExists(stackConfig cloudformation.StackConfiguration) (bool, error)
 	DeletePipeline(pipeline deploy.Pipeline) error
 	AddPipelineResourcesToApp(app *config.Application, region string) error
+	Template(stackName string) (string, error)
 	appResourcesGetter
 	// TODO: Add StreamPipelineCreation method
 }
 
 type appDeployer interface {
 	DeployApp(in *deploy.CreateAppInput) error
-	AddServiceToApp(app *config.Application, svcName string) error
-	AddJobToApp(app *config.Application, jobName string) error
+	AddServiceToApp(app *config.Application, svcName string, opts ...cloudformation.AddWorkloadToAppOpt) error
+	AddJobToApp(app *config.Application, jobName string, opts ...cloudformation.AddWorkloadToAppOpt) error
 	AddEnvToApp(opts *cloudformation.AddEnvToAppOpts) error
 	DelegateDNSPermissions(app *config.Application, accountID string) error
 	DeleteApp(name string) error
@@ -400,6 +421,11 @@ type appDeployer interface {
 type appResourcesGetter interface {
 	GetAppResourcesByRegion(app *config.Application, region string) (*stack.AppRegionalResources, error)
 	GetRegionalAppResources(app *config.Application) ([]*stack.AppRegionalResources, error)
+}
+
+type envDeleterFromApp interface {
+	appResourcesGetter
+	RemoveEnvFromApp(opts *cloudformation.RemoveEnvFromAppOpts) error
 }
 
 type taskDeployer interface {
@@ -485,7 +511,7 @@ type appSelector interface {
 
 type appEnvSelector interface {
 	appSelector
-	Environment(prompt, help, app string, additionalOpts ...string) (string, error)
+	Environment(prompt, help, app string, additionalOpts ...prompt.Option) (string, error)
 }
 
 type cfnSelector interface {
@@ -503,6 +529,7 @@ type deploySelector interface {
 	appSelector
 	DeployedService(prompt, help string, app string, opts ...selector.GetDeployedWorkloadOpts) (*selector.DeployedService, error)
 	DeployedJob(prompt, help string, app string, opts ...selector.GetDeployedWorkloadOpts) (*selector.DeployedJob, error)
+	DeployedWorkload(prompt, help string, app string, opts ...selector.GetDeployedWorkloadOpts) (*selector.DeployedWorkload, error)
 }
 
 type pipelineEnvSelector interface {
@@ -527,6 +554,7 @@ type wsSelector interface {
 	Service(prompt, help string) (string, error)
 	Job(prompt, help string) (string, error)
 	Workload(msg, help string) (string, error)
+	Workloads(msg, help string) ([]string, error)
 }
 
 type staticSourceSelector interface {
@@ -573,6 +601,10 @@ type jobInitializer interface {
 
 type svcInitializer interface {
 	Service(props *initialize.ServiceProps) (string, error)
+}
+
+type wkldInitializerWithoutManifest interface {
+	AddWorkloadToApp(appName, name, workloadType string) error
 }
 
 type roleDeleter interface {
@@ -670,6 +702,14 @@ type templateDiffer interface {
 	DeployDiff(inTmpl string) (string, error)
 }
 
+type dockerEngineRunner interface {
+	CheckDockerEngineRunning() error
+	Run(context.Context, *dockerengine.RunOptions) error
+	IsContainerRunning(string) (bool, error)
+	Stop(string) error
+	Rm(string) error
+}
+
 type workloadStackGenerator interface {
 	UploadArtifacts() (*clideploy.UploadArtifactsOutput, error)
 	GenerateCloudFormationTemplate(in *clideploy.GenerateCloudFormationTemplateInput) (
@@ -697,4 +737,16 @@ type envPackager interface {
 	UploadArtifacts() (*clideploy.UploadEnvArtifactsOutput, error)
 	AddonsTemplate() (string, error)
 	templateDiffer
+}
+
+type stackConfiguration interface {
+	StackName() string
+	Template() (string, error)
+	Parameters() ([]*sdkcloudformation.Parameter, error)
+	Tags() []*sdkcloudformation.Tag
+	SerializedParameters() (string, error)
+}
+
+type secretGetter interface {
+	GetSecretValue(context.Context, string) (string, error)
 }

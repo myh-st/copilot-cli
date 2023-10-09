@@ -371,12 +371,12 @@ func convertHTTPHealthCheck(hc *manifest.HealthCheckArgsOrString) template.HTTPH
 		return opts
 	}
 	if hc.IsBasic() {
-		opts.HealthCheckPath = hc.Basic
+		opts.HealthCheckPath = convertPath(hc.Basic)
 		return opts
 	}
 
 	if hc.Advanced.Path != nil {
-		opts.HealthCheckPath = *hc.Advanced.Path
+		opts.HealthCheckPath = convertPath(*hc.Advanced.Path)
 	}
 	if hc.Advanced.Port != nil {
 		opts.Port = strconv.Itoa(aws.IntValue(hc.Advanced.Port))
@@ -573,6 +573,23 @@ type routingRuleConfigConverter struct {
 	redirectToHTTPS bool
 }
 
+// convertPath attempts to standardize manifest paths on '/path' or '/' patterns.
+//   - If the path starts with a / (including '/'), return it unmodified.
+//   - Otherwise, prepend a leading '/' character.
+//
+// CFN health check and path patterns expect a leading '/', so we do that here instead of in the template.
+//
+// Empty strings, if they make it to this point, are converted to '/'.
+func convertPath(path string) string {
+	if path == "" {
+		return "/"
+	}
+	if path[0] == '/' {
+		return path
+	}
+	return "/" + path
+}
+
 func (conv routingRuleConfigConverter) convert() (*template.ALBListenerRule, error) {
 	var aliases []string
 	var err error
@@ -594,7 +611,7 @@ func (conv routingRuleConfigConverter) convert() (*template.ALBListenerRule, err
 	}
 
 	config := &template.ALBListenerRule{
-		Path:                aws.StringValue(conv.rule.Path),
+		Path:                convertPath(aws.StringValue(conv.rule.Path)),
 		TargetContainer:     targetContainer,
 		TargetPort:          targetPort,
 		Aliases:             aliases,
@@ -671,9 +688,18 @@ func (s *LoadBalancedWebService) convertNetworkLoadBalancer() (networkLoadBalanc
 		return networkLoadBalancerConfig{}, fmt.Errorf(`convert "nlb.alias" to string slice: %w`, err)
 	}
 
+	// TODO(Aiden): remove when NetworkLoadBalancer is forcibly updated
+	var udpListenerExists bool
+	for _, listener := range listeners {
+		if strings.EqualFold(listener.Protocol, manifest.UDP) {
+			udpListenerExists = true
+		}
+	}
+
 	config := networkLoadBalancerConfig{
 		settings: &template.NetworkLoadBalancer{
 			PublicSubnetCIDRs:   s.publicSubnetCIDRBlocks,
+			UDPListenerExists:   udpListenerExists,
 			Listener:            listeners,
 			Aliases:             aliases,
 			MainContainerPort:   s.manifest.MainContainerPort(),
@@ -714,9 +740,15 @@ func convertAllowedSourceIPs(allowedSourceIPs []manifest.IPNet) []string {
 	return sourceIPs
 }
 
-func convertServiceConnect(s manifest.ServiceConnectBoolOrArgs) *template.ServiceConnect {
-	return &template.ServiceConnect{
-		Alias: s.ServiceConnectArgs.Alias,
+func convertServiceConnectServer(s manifest.ServiceConnectBoolOrArgs, target *manifest.ServiceConnectTargetContainer) *template.ServiceConnectServer {
+	if target == nil || target.Port == "" || target.Port == template.NoExposedContainerPort {
+		return nil
+	}
+
+	return &template.ServiceConnectServer{
+		Name:  target.Container,
+		Port:  target.Port,
+		Alias: aws.StringValue(s.Alias),
 	}
 }
 
@@ -833,7 +865,7 @@ func convertEFSPermissions(input map[string]*manifest.Volume) []*template.EFSPer
 		output = append(output, &template.EFSPermission{
 			Write:         write,
 			AccessPointID: accessPointID,
-			FilesystemID:  volume.EFS.Advanced.FileSystemID,
+			FilesystemID:  convertFileSystemID(volume.EFS.Advanced),
 		})
 	}
 	return output
@@ -915,7 +947,7 @@ func convertEFSConfiguration(in manifest.EFSVolumeConfiguration) *template.EFSVo
 	iam := aws.String(defaultIAM)
 	if in.AuthConfig.IsEmpty() {
 		return &template.EFSVolumeConfiguration{
-			Filesystem:    in.FileSystemID,
+			Filesystem:    convertFileSystemID(in),
 			RootDirectory: rootDir,
 			IAM:           iam,
 		}
@@ -926,11 +958,18 @@ func convertEFSConfiguration(in manifest.EFSVolumeConfiguration) *template.EFSVo
 	}
 
 	return &template.EFSVolumeConfiguration{
-		Filesystem:    in.FileSystemID,
+		Filesystem:    convertFileSystemID(in),
 		RootDirectory: rootDir,
 		IAM:           iam,
 		AccessPointID: in.AuthConfig.AccessPointID,
 	}
+}
+
+func convertFileSystemID(in manifest.EFSVolumeConfiguration) template.FileSystemID {
+	if in.FileSystemID.Plain != nil {
+		return template.PlainFileSystemID(aws.StringValue(in.FileSystemID.Plain))
+	}
+	return template.ImportedFileSystemID(aws.StringValue(in.FileSystemID.FromCFN.Name))
 }
 
 func convertNetworkConfig(network manifest.NetworkConfig) template.NetworkOpts {
